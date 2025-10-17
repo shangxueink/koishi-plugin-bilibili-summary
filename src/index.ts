@@ -1,4 +1,4 @@
-import { Schema } from 'koishi'
+import { Context, Schema } from 'koishi'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
@@ -9,12 +9,65 @@ export const usage = '输入“分析 [B站视频地址]”提取字幕并用 Ge
 export const Config = Schema.object({
   sessdata: Schema.string().role('secret').description('B站 SESSDATA Cookie，用于提升字幕接口成功率').default(''),
   geminiKey: Schema.string().role('secret').description('Google Gemini API Key').default(''),
-  preferredLangs: Schema.array(Schema.string()).description('字幕语言优先级').default(['zh-CN','zh-Hans','zh-Hant','zh','en']),
+  preferredLangs: Schema.array(Schema.string()).description('字幕语言优先级').default(['zh-CN', 'zh-Hans', 'zh-Hant', 'zh', 'en']),
   includeTime: Schema.boolean().description('显示字幕时包含时间戳').default(true),
   saveSubtitle: Schema.boolean().description('保存字幕到本地文件').default(false),
 }).description('提取 B 站视频字幕并用 Gemini 总结')
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36 Edg/127.0.0.0'
+
+export function apply(ctx: Context, config) {
+  const logger = ctx.logger('bilibili-summary')
+  const preferred = config.preferredLangs?.length ? config.preferredLangs : ['zh-CN', 'zh-Hans', 'zh-Hant', 'zh', 'en']
+
+  ctx.command('分析 <url:text>', '提取 B 站字幕并用 Gemini 总结')
+    .alias('bili分析')
+    .example('分析 https://www.bilibili.com/video/BV...')
+    .action(async ({ session }, url) => {
+      if (!url) return '请提供 B 站视频地址。'
+      const headers = buildHeaders(config.sessdata || '')
+      let aid, cid, bv, body, text, summary, subtitleUrl
+      try {
+        await session.send('开始解析视频地址…')
+        const r = await getAidCid(ctx, url, headers)
+        aid = r.aid; cid = r.cid
+        bv = extractBV(url) || `aid${aid}_cid${cid}`
+
+        await session.send('获取字幕地址…')
+        subtitleUrl = await getSubtitleUrl(ctx, aid, cid, headers, preferred)
+        if (!subtitleUrl) return '未获取到字幕地址，可能需要有效的 SESSDATA 或接口发生变化。'
+
+        await session.send('拉取字幕数据…')
+        body = await fetchSubtitleBody(ctx, subtitleUrl, headers)
+        if (!body?.length) return '字幕数据为空。'
+
+        text = buildSubtitleText(body, !!config.includeTime)
+        if (config.saveSubtitle) {
+          try {
+            const p = await saveTextToFile(bv, text)
+            logger.info(`字幕已保存: ${p}`)
+          } catch (e) {
+            logger.warn(`保存字幕失败: ${e?.message || e}`)
+          }
+        }
+
+        await session.send('开始使用 Gemini 生成总结…')
+        summary = await summarizeWithGemini(text, config.geminiKey, logger)
+
+        const result = summary?.trim()
+          ? `Gemini 总结：\n${summary}`
+          : 'Gemini 总结为空（未配置 API Key 或调用失败）。'
+
+        // 如果字幕也想回显，可取消下行注释：
+        // await session.send(h.quote(session.messageId) + '字幕：\n' + text.slice(0, 4000))
+
+        return result
+      } catch (e) {
+        logger.error(e)
+        return `处理失败：${e?.message || e}`
+      }
+    })
+}
 
 function buildHeaders(sessdata) {
   const headers = { 'user-agent': UA }
@@ -88,7 +141,7 @@ async function getSubtitleUrl(ctx, aid, cid, headers, preferredLangs) {
 function pickSubtitleUrl(subList, preferredLangs) {
   if (!subList?.length) return null
   let chosen = null
-  for (const lang of preferredLangs || ['zh-CN','zh-Hans','zh-Hant','zh','en']) {
+  for (const lang of preferredLangs || ['zh-CN', 'zh-Hans', 'zh-Hant', 'zh', 'en']) {
     chosen = subList.find(i => i?.lan === lang)
     if (chosen) break
   }
@@ -157,7 +210,7 @@ async function summarizeWithGemini(text, apiKey, logger) {
       partials.map((p, idx) => `分段${idx + 1}：\n${p}`).join('\n\n'),
     ].join('\n\n')
     const finalResp = await model.generateContent(mergePrompt)
-   return finalResp?.response?.text() ?? ''
+    return finalResp?.response?.text() ?? ''
   } catch (e) {
     logger?.error(`Gemini 总结失败: ${e?.message || e}`)
     return ''
@@ -171,57 +224,4 @@ async function saveTextToFile(baseName, text) {
   const full = path.join(base, file)
   await fs.writeFile(full, text, 'utf8')
   return full
-}
-
-export function apply(ctx, config) {
-  const logger = ctx.logger('bilibili-summary')
-  const preferred = config.preferredLangs?.length ? config.preferredLangs : ['zh-CN','zh-Hans','zh-Hant','zh','en']
-
-  ctx.command('分析 <url:text>', '提取 B 站字幕并用 Gemini 总结')
-    .alias('bili分析')
-    .example('分析 https://www.bilibili.com/video/BV...')
-    .action(async ({ session }, url) => {
-      if (!url) return '请提供 B 站视频地址。'
-      const headers = buildHeaders(config.sessdata || '')
-      let aid, cid, bv, body, text, summary, subtitleUrl
-      try {
-        await session.send('开始解析视频地址…')
-        const r = await getAidCid(ctx, url, headers)
-        aid = r.aid; cid = r.cid
-        bv = extractBV(url) || `aid${aid}_cid${cid}`
-
-        await session.send('获取字幕地址…')
-        subtitleUrl = await getSubtitleUrl(ctx, aid, cid, headers, preferred)
-        if (!subtitleUrl) return '未获取到字幕地址，可能需要有效的 SESSDATA 或接口发生变化。'
-
-        await session.send('拉取字幕数据…')
-        body = await fetchSubtitleBody(ctx, subtitleUrl, headers)
-        if (!body?.length) return '字幕数据为空。'
-
-        text = buildSubtitleText(body, !!config.includeTime)
-        if (config.saveSubtitle) {
-          try {
-            const p = await saveTextToFile(bv, text)
-            logger.info(`字幕已保存: ${p}`)
-          } catch (e) {
-            logger.warn(`保存字幕失败: ${e?.message || e}`)
-          }
-        }
-
-        await session.send('开始使用 Gemini 生成总结…')
-        summary = await summarizeWithGemini(text, config.geminiKey, logger)
-
-        const result = summary?.trim()
-          ? `Gemini 总结：\n${summary}`
-          : 'Gemini 总结为空（未配置 API Key 或调用失败）。'
-
-        // 如果字幕也想回显，可取消下行注释：
-        // await session.send(h.quote(session.messageId) + '字幕：\n' + text.slice(0, 4000))
-
-        return result
-      } catch (e) {
-        logger.error(e)
-        return `处理失败：${e?.message || e}`
-      }
-    })
 }
