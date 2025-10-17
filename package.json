@@ -1,0 +1,17 @@
+{
+  "name": "koishi-plugin-bilibili-summary",
+  "version": "2.0.1",
+  "private": false,
+  "description": "提取 B 站视频字幕并用 Gemini 生成总结的 Koishi 插件",
+  "main": "index.mjs",
+  "type": "module",
+  "keywords": ["koishi", "plugin", "bilibili", "subtitle", "summary", "gemini"],
+  "contributors": [],
+  "license": "MIT",
+  "peerDependencies": {
+    "koishi": "^4.3.2"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0"
+  }
+}
